@@ -3,12 +3,14 @@ use std::{fmt::Display, future::Future};
 use anyhow::anyhow;
 use chrono::{Datelike, Local, NaiveDate, TimeZone, Utc};
 use clap::Subcommand;
+use csv::WriterBuilder;
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Response,
 };
 use scraper::{selectable::Selectable, Html, Selector};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt as _;
 use tracing::info;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -199,4 +201,91 @@ fn get_array_size_for_frequency(
     };
 
     Ok(num)
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum FileFormat {
+    CSV,
+    JSON,
+}
+
+impl Display for FileFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let format = match self {
+            Self::CSV => "csv",
+            Self::JSON => "json",
+        };
+
+        write!(f, "{format}")
+    }
+}
+
+pub async fn run(
+    ticker: String,
+    start: String,
+    end: Option<String>,
+    frequency: Frequency,
+    file_name: Option<String>,
+    file_format: FileFormat,
+) -> anyhow::Result<()> {
+    let client = compose_client(&ticker, &start, end.as_deref(), frequency)?;
+
+    let data = client.await?.text().await?;
+
+    let data = parse_html(data, frequency, &start, end.as_deref())?;
+
+    let file_name = if let Some(name) = file_name {
+        name
+    } else {
+        format!(
+            "yfp_{}_{}_{}_{}_{}",
+            ticker,
+            start,
+            end.as_deref().unwrap_or("today"),
+            frequency,
+            Local::now().format("%Y-%m-%d")
+        )
+    };
+
+    match file_format {
+        FileFormat::CSV => {
+            let mut buf = Vec::new();
+
+            // drop exclusive reference in scope
+            {
+                let mut wtr = WriterBuilder::new().from_writer(&mut buf);
+
+                for record in data {
+                    wtr.serialize(record)?;
+                }
+
+                wtr.flush()?;
+            }
+
+            let mut file = tokio::fs::File::options()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(format!("{}.csv", file_name))
+                .await?;
+
+            file.write_all(&buf).await?;
+            info!("File saved to {file_name}.csv");
+        }
+        FileFormat::JSON => {
+            let serialized_data = serde_json::to_string_pretty(&data)?;
+
+            let mut file = tokio::fs::File::options()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(format!("{}.json", file_name))
+                .await?;
+
+            file.write_all(serialized_data.as_bytes()).await?;
+            info!("File saved to {file_name}.json");
+        }
+    };
+
+    Ok(())
 }

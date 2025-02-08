@@ -6,7 +6,7 @@ use clap::Parser;
 use csv::WriterBuilder;
 use tokio::io::AsyncWriteExt;
 use tracing::info;
-use yfp::{compose_client, human_readable_date, parse_html, Frequency};
+use yfp::{compose_client, human_readable_date, parse_html, FileFormat, Frequency};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author = "Eyob", name = "yfp", about = "A yahoo finance scraper")]
@@ -32,23 +32,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     frequency: Frequency,
-}
-
-#[derive(Clone, Debug, clap::ValueEnum)]
-enum FileFormat {
-    CSV,
-    JSON,
-}
-
-impl Display for FileFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let format = match self {
-            Self::CSV => "csv",
-            Self::JSON => "json",
-        };
-
-        write!(f, "{format}")
-    }
 }
 
 impl Display for Cli {
@@ -85,64 +68,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("{cli}");
 
-    let client = compose_client(&cli.ticker, &cli.start, cli.end.as_deref(), cli.frequency)?;
-
-    let data = client.await?.text().await?;
-
-    let data = parse_html(data, cli.frequency, &cli.start, cli.end.as_deref())?;
-
-    let file_name = if let Some(name) = cli.file_name {
-        name
-    } else {
-        format!(
-            "yfp_{}_{}_{}_{}_{}",
-            cli.ticker,
-            cli.start,
-            cli.end.as_deref().unwrap_or("today"),
-            cli.frequency,
-            Local::now().format("%Y-%m-%d")
-        )
-    };
-
-    match cli.file_format {
-        FileFormat::CSV => {
-            let mut buf = Vec::new();
-
-            // drop exclusive reference in scope
-            {
-                let mut wtr = WriterBuilder::new().from_writer(&mut buf);
-
-                for record in data {
-                    wtr.serialize(record)?;
-                }
-
-                wtr.flush()?;
-            }
-
-            let mut file = tokio::fs::File::options()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(format!("{}.csv", file_name))
-                .await?;
-
-            file.write_all(&buf).await?;
-            info!("File saved to {file_name}.csv");
-        }
-        FileFormat::JSON => {
-            let serialized_data = serde_json::to_string_pretty(&data)?;
-
-            let mut file = tokio::fs::File::options()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(format!("{}.json", file_name))
-                .await?;
-
-            file.write_all(serialized_data.as_bytes()).await?;
-            info!("File saved to {file_name}.json");
-        }
-    }
-
-    Ok(())
+    yfp::run(
+        cli.ticker,
+        cli.start,
+        cli.end,
+        cli.frequency,
+        cli.file_name,
+        cli.file_format,
+    ).await
 }
