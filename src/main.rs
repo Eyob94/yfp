@@ -3,10 +3,8 @@ use std::fmt::Display;
 
 use chrono::Local;
 use clap::Parser;
-use csv::WriterBuilder;
-use tokio::io::AsyncWriteExt;
 use tracing::info;
-use yfp::{compose_client, human_readable_date, parse_html, FileFormat, Frequency};
+use yfp::{human_readable_date, FileFormat, Frequency};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author = "Eyob", name = "yfp", about = "A yahoo finance scraper")]
@@ -75,5 +73,6 @@ async fn main() -> anyhow::Result<()> {
         cli.frequency,
         cli.file_name,
         cli.file_format,
-    ).await
+    )
+    .await
 }
