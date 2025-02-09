@@ -19,17 +19,17 @@ pub mod date_util;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
 pub struct OHLCV {
-    date: Date,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
-    adj_close: f64,
-    volume: u64,
+    pub date: Date,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub adj_close: f64,
+    pub volume: u64,
 }
 
 impl OHLCV {
-    fn insert(&mut self, sli: [f64; 7]) {
+    pub fn insert(&mut self, sli: [f64; 7]) {
         self.date = Date::Timestamp(sli[0] as u64);
         self.open = sli[1];
         self.high = sli[2];
