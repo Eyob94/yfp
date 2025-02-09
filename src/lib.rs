@@ -1,9 +1,10 @@
-use std::{fmt::Display, future::Future};
+use std::{borrow::Cow, fmt::Display, future::Future};
 
 use anyhow::anyhow;
-use chrono::{Datelike, Local, NaiveDate, TimeZone, Utc};
+use chrono::{Local, NaiveDate};
 use clap::Subcommand;
 use csv::WriterBuilder;
+use date_util::{date_string_to_timestamp, date_to_timestamp, human_readable_date, Date};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Response,
@@ -13,10 +14,12 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt as _;
 use tracing::info;
 
+pub mod date_util;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
-pub struct OHLC {
-    date: String,
+pub struct OHLCV {
+    date: Date,
     open: f64,
     high: f64,
     low: f64,
@@ -25,15 +28,15 @@ pub struct OHLC {
     volume: u64,
 }
 
-impl OHLC {
-    fn insert(&mut self, sli: [f64; 6], date: String) {
-        self.date = date;
-        self.open = sli[0];
-        self.high = sli[1];
-        self.low = sli[2];
-        self.close = sli[3];
-        self.adj_close = sli[4];
-        self.volume = sli[5] as u64;
+impl OHLCV {
+    fn insert(&mut self, sli: [f64; 7]) {
+        self.date = Date::Timestamp(sli[0] as u64);
+        self.open = sli[1];
+        self.high = sli[2];
+        self.low = sli[3];
+        self.close = sli[4];
+        self.adj_close = sli[5];
+        self.volume = sli[6] as u64;
     }
 }
 
@@ -54,19 +57,6 @@ impl Display for Frequency {
 
         write!(f, "{word}")
     }
-}
-
-pub fn human_readable_date(date_str: &str) -> anyhow::Result<String> {
-    let naive_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
-
-    let formatted_date = format!(
-        "{} {}, {}",
-        naive_date.format("%B"),
-        naive_date.day(),
-        naive_date.year()
-    );
-
-    Ok(formatted_date)
 }
 
 pub fn compose_client(
@@ -123,18 +113,12 @@ pub fn compose_client(
     Ok(req)
 }
 
-fn date_to_timestamp(date_str: &str) -> anyhow::Result<i64> {
-    let naive_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
-    let datetime = Utc.from_utc_datetime(&naive_date.and_hms_opt(23, 59, 59).unwrap());
-    Ok(datetime.timestamp())
-}
-
 pub fn parse_html(
     html: String,
     freq: Frequency,
     start: &str,
     end: Option<&str>,
-) -> anyhow::Result<Vec<OHLC>> {
+) -> anyhow::Result<Vec<OHLCV>> {
     let fragment = Html::parse_fragment(&html);
     let table_body = Selector::parse("tbody").map_err(|_| anyhow!("Error parsing td"))?;
     let table_row = Selector::parse("tr").map_err(|_| anyhow!("Error parsing table row"))?;
@@ -150,34 +134,43 @@ pub fn parse_html(
 
     let capacity = get_array_size_for_frequency(freq, start, end)?;
 
-    let mut candlesticks: Vec<OHLC> = if let Some(cap) = capacity {
+    let mut candlesticks: Vec<OHLCV> = if let Some(cap) = capacity {
         Vec::with_capacity(cap as usize)
     } else {
         vec![]
     };
     for row in tbody.select(&table_row) {
         // open, high, low, close, adj.close, volume
-        let mut ohlcv_vec = [0_f64; 6];
+        let mut ohlcv_vec = [0_f64; 7];
         let mut empty = true;
 
         let mut cells = row.select(&table_data);
-        let date = cells.next().map(|d| d.inner_html()).unwrap_or_default();
+        let date: f64 = cells
+            .next()
+            .map(|d| {
+                let date_in_text = d.inner_html();
+                date_string_to_timestamp(&date_in_text).unwrap_or_default() as f64
+            })
+            .unwrap_or_default();
 
-        if date.is_empty() {
+        if date == 0_f64 {
             continue;
+        } else {
+            ohlcv_vec[0] = date;
         }
+
         for (i, data) in cells.enumerate() {
             let text = data.inner_html().replace(",", "");
 
             // If it fails it's the split/dividend row
             if let Ok(val) = text.parse::<f64>() {
                 empty = false;
-                ohlcv_vec[i] = val;
+                ohlcv_vec[i + 1] = val;
             }
         }
         if !empty {
-            let mut ohlcv: OHLC = OHLC::default();
-            ohlcv.insert(ohlcv_vec, date);
+            let mut ohlcv: OHLCV = OHLCV::default();
+            ohlcv.insert(ohlcv_vec);
             candlesticks.push(ohlcv);
         }
     }
@@ -220,33 +213,48 @@ impl Display for FileFormat {
     }
 }
 
-pub async fn run(
-    ticker: String,
-    start: String,
-    end: Option<String>,
+pub async fn retrieve_historical_data(
+    ticker: &str,
+    start: &str,
+    end: Option<&str>,
     frequency: Frequency,
-    file_name: Option<String>,
-    file_format: FileFormat,
-) -> anyhow::Result<()> {
-    let client = compose_client(&ticker, &start, end.as_deref(), frequency)?;
+) -> anyhow::Result<Vec<OHLCV>> {
+    let client = compose_client(ticker, start, end, frequency)?;
 
     let data = client.await?.text().await?;
 
-    let data = parse_html(data, frequency, &start, end.as_deref())?;
+    let parsed_data = parse_html(data, frequency, start, end)?;
 
-    let file_name = if let Some(name) = file_name {
-        name
+    Ok(parsed_data)
+}
+
+pub fn prepare_file_name<'a>(
+    ticker: &'a str,
+    start: &'a str,
+    end: Option<&'a str>,
+    frequency: Frequency,
+    file_name: Option<&'a str>,
+) -> Cow<'a, str> {
+    if let Some(name) = file_name {
+        Cow::Borrowed(name)
     } else {
-        format!(
+        let autoname = format!(
             "yfp_{}_{}_{}_{}_{}",
             ticker,
             start,
-            end.as_deref().unwrap_or("today"),
+            end.unwrap_or("today"),
             frequency,
             Local::now().format("%Y-%m-%d")
-        )
-    };
+        );
+        Cow::Owned(autoname)
+    }
+}
 
+pub async fn add_to_file(
+    data: Vec<OHLCV>,
+    file_name: &str,
+    file_format: FileFormat,
+) -> anyhow::Result<()> {
     match file_format {
         FileFormat::CSV => {
             let mut buf = Vec::new();
@@ -288,4 +296,91 @@ pub async fn run(
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use core::f64;
+
+    use date_util::Date;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    use super::*;
+
+    #[test]
+    fn test_proper_naming() {
+        let name = prepare_file_name(
+            "VOO",
+            "2020-01-01",
+            Some("2024-01-01"),
+            Frequency::Daily,
+            None,
+        );
+
+        assert!(name.starts_with("yfp_VOO_2020-01-01_2024-01-01_daily_"));
+
+        let given_name = prepare_file_name(
+            "VOO",
+            "2020-01-01",
+            Some("2024-01-01"),
+            Frequency::Daily,
+            Some("proper_name"),
+        );
+
+        assert_eq!(given_name, "proper_name");
+    }
+
+    #[tokio::test]
+    async fn test_get_historical_data() -> anyhow::Result<()> {
+        let ticker = "VOO";
+        let parsed_data =
+            retrieve_historical_data(ticker, "2020-01-01", None, Frequency::Monthly).await?;
+        assert!(!parsed_data.is_empty());
+
+        // Closing price of VOO on January of 2020 was 273.59
+        assert!((parsed_data.last().unwrap().adj_close - 273.59).abs() < f64::EPSILON);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_add_file_csv() -> anyhow::Result<()> {
+        let temp_dir = tempdir()?;
+        let base_path = temp_dir.path().join("test_csv");
+        let file_name = base_path.to_str().unwrap();
+
+        let data = vec![
+            OHLCV {
+                date: Date::Human("Dec 24, 2020".into()),
+                open: 1.0,
+                high: 2.0,
+                low: 0.5,
+                close: 1.5,
+                adj_close: 1.5,
+                volume: 100,
+            },
+            OHLCV {
+                date: Date::Human("Dec 25, 2020".into()),
+                open: 1.5,
+                high: 2.5,
+                low: 1.0,
+                close: 2.0,
+                adj_close: 2.0,
+                volume: 150,
+            },
+        ];
+
+        add_to_file(data, file_name, FileFormat::CSV).await?;
+
+        let file_path = base_path.with_extension("csv");
+        let content = fs::read_to_string(&file_path).await?;
+        assert!(!content.trim().is_empty());
+
+        assert!(content.contains("Dec 24, 2020"));
+        assert!(content.contains("1.0"));
+        assert!(content.contains("1.5"));
+
+        Ok(())
+    }
 }

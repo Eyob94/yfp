@@ -25,6 +25,7 @@ cargo install yfp
 ```
 git clone https://Eyob94/yfp.git
 cd yfp
+cargo test
 cargo build --release
 
 ./target/debug/yfp -h
@@ -77,6 +78,41 @@ File Name: Vanguard.json
 
 2025-02-08T21:21:50.873733Z  INFO yfp: Getting historical data for VOO from November 26, 2001 until November 14, 2024 on daily frequency
 2025-02-08T21:21:57.715901Z  INFO yfp: File saved to Vanguard.json
+```
+
+#### As a library
+
+**Add it to your Cargo.toml**
+
+```toml
+
+yfp = "0.2"
+
+```
+
+**Import it**
+
+```rust
+
+use yfp::{retrieve_historical_data, Frequency, OHLCV};
+
+#[tokio::main]
+async fn main(){
+    let voo_data: Vec<OHLCV> = retrieve_historical_data("VOO", "2020-01-01", None, Frequency::Daily).await?
+
+    for voo_daily in voo_data.iter(){
+        // voo_daily.date - in both timestamp and human readable format
+        // voo_daily.open
+        // voo_daily.high
+        // voo_daily.low
+        // voo_daily.close
+        // voo_daily.adj_close
+        // voo_daily.volume
+    }
+
+
+}
+
 ```
 
 ### Upcoming Features

@@ -1,10 +1,13 @@
 #![allow(clippy::upper_case_acronyms)]
-use std::fmt::Display;
+use std::{borrow::Borrow, fmt::Display};
 
 use chrono::Local;
 use clap::Parser;
 use tracing::info;
-use yfp::{human_readable_date, FileFormat, Frequency};
+use yfp::{
+    add_to_file, date_util::human_readable_date, prepare_file_name, retrieve_historical_data,
+    FileFormat, Frequency,
+};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author = "Eyob", name = "yfp", about = "A yahoo finance scraper")]
@@ -66,13 +69,19 @@ async fn main() -> anyhow::Result<()> {
 
     info!("{cli}");
 
-    yfp::run(
-        cli.ticker,
-        cli.start,
-        cli.end,
+    let parsed_data =
+        retrieve_historical_data(&cli.ticker, &cli.start, cli.end.as_deref(), cli.frequency)
+            .await?;
+
+    let file_name = prepare_file_name(
+        &cli.ticker,
+        &cli.start,
+        cli.end.as_deref(),
         cli.frequency,
-        cli.file_name,
-        cli.file_format,
-    )
-    .await
+        cli.file_name.as_deref(),
+    );
+
+    add_to_file(parsed_data, file_name.borrow(), cli.file_format).await?;
+
+    Ok(())
 }
